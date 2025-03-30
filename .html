@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Curvy 3D Runner - High Score</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #a5c9e3; /* Style: Sky color */
+            font-family: 'Trebuchet MS', sans-serif;
+        }
+        canvas { display: block; }
+        .ui-overlay {
+            position: absolute;
+            color: #3f4e41; /* Style: Dark Green text */
+            background-color: rgba(255, 255, 255, 0.65); /* Style: Semi-transparent white */
+            padding: 8px 15px;
+            border-radius: 8px;
+            font-size: 16px; /* Slightly smaller base font */
+            text-align: center;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            z-index: 10; /* Ensure UI is on top */
+        }
+        #scoreBoard {
+            top: 15px;
+            right: 15px;
+            left: auto;
+            text-align: right;
+            font-size: 18px; /* Larger font for score */
+        }
+        #scoreBoard span { /* Style high score differently */
+            opacity: 0.7;
+            margin-right: 10px;
+        }
+        #messageBoard {
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 26px; padding: 25px; display: none;
+        }
+        /* Mobile Controls Styling */
+         #controls-move {
+             position: absolute;
+             bottom: 20px;
+             left: 50%;
+             transform: translateX(-50%);
+             opacity: 0.7;
+             display: none; /* Hidden by default, shown if touch */
+             z-index: 5;
+         }
+         #controls-move button {
+             background-color: rgba(90, 125, 74, 0.8); /* Style: Greenish buttons */
+             color: white; border: none;
+             width: 60px; height: 60px; margin: 5px;
+             border-radius: 10px; font-size: 24px;
+             touch-action: manipulation; /* Prevent zoom/scroll */
+             user-select: none; /* Prevent text selection */
+             -webkit-tap-highlight-color: transparent; /* Remove tap highlight */
+         }
+    </style>
+</head>
+<body>
+    <div id="container"></div>
+    <div id="scoreBoard" class="ui-overlay"><span>HI: 0</span> Score: 0</div>
+    <div id="messageBoard" class="ui-overlay">Press SPACE to Start</div>
+     <!-- Mobile Left/Right Controls -->
+    <div id="controls-move">
+        <button id="btn-left">◄</button>
+        <button id="btn-jump">▲</button> <!-- Jump Button -->
+        <button id="btn-right">►</button>
+    </div>
+
+    <script type="importmap">
+      { "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" } }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // --- Style Colors ---
+        const COLOR_SKY = 0xa5c9e3; const COLOR_FOG = 0xa5c9e3;
+        const COLOR_GROUND_DARK = 0x819a48; const COLOR_PATH = 0xc2b98d; // Slightly lighter path
+        const COLOR_TREE_LEAVES = 0x476d4c; const COLOR_TREE_TRUNK = 0x6b543e;
+        const COLOR_MOUNTAIN = 0x7f9cb0; const COLOR_CLOUD = 0xf0f8ff;
+        const COLOR_RUNNER = 0x000000; // Black Runner
+        const COLOR_CACTUS = 0x3a9d23; // Green Cactus
+        const COLOR_PTERO = 0x8c7a69;
+        const COLOR_TRAIN_BODY = 0x5c7a8f; // Bluish grey train body
+        const COLOR_TRAIN_WHEEL = 0x333333; // Dark wheels
+
+        // --- Game Variables ---
+        let scene, camera, renderer, clock, runner, groundPathMesh;
+        let ambientLight, directionalLight;
+        let obstacles = []; let clouds = []; let trees = []; let mountains = [];
+        // let train, trainPathCurve; // <<< REMOVED separate train path
+        let isTouchDevice = false;
+
+        const GAME_STATE = { IDLE: 'idle', RUNNING: 'running', GAME_OVER: 'game_over' };
+        let currentGameState = GAME_STATE.IDLE;
+
+        let score = 0;
+        let highScore = 0;
+        let gameSpeed = 7;
+        const initialGameSpeed = 7; const maxGameSpeed = 40;
+        const speedIncreaseFactor = 0.0005;
+
+        let difficultyLevel = 0; let nextMilestoneScore = 500;
+
+        const runnerStartY = 0.4; const gravity = 30; const jumpVelocity = 11.5; // Slightly higher jump
+        let runnerVelocityY = 0; let isOnGround = true;
+        let runnerOffsetX = 0; const maxRunnerOffsetX = 1.2; const runnerSideSpeed = 5.0;
+        let moveRunnerLeft = false; let moveRunnerRight = false;
+
+        const pathWidth = 1.5; const pathSegmentLength = 5;
+        const pathPointsAhead = 20; const pathPointsBehind = 4;
+        let pathPoints = []; let pathCurve = null;
+        let currentRunnerWorldZ = 0;
+
+        const obstacleSpawnLookAhead = 60; // Spawn slightly further
+        let lastSpawnTime = 0; let nextSpawnDelay = 2.0;
+        let lastTrainSpawnTime = -10; // <<< Timer for train spawning, start negative to allow early spawn
+        const minTrainSpawnDelay = 15.0; // <<< Minimum seconds between trains
+
+        const scoreElement = document.getElementById('scoreBoard');
+        const messageElement = document.getElementById('messageBoard');
+        const controlsMoveDiv = document.getElementById('controls-move');
+
+        const HIGH_SCORE_KEY = 'curvyRunnerHighScore';
+
+        // --- Core Functions ---
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(COLOR_SKY);
+            scene.fog = new THREE.Fog(COLOR_FOG, 30, 95);
+
+            clock = new THREE.Clock();
+
+            camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 200);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.toneMapping = THREE.ACESFilmicToneMapping; renderer.toneMappingExposure = 0.9;
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            ambientLight = new THREE.AmbientLight(0xffffff, 0.75); scene.add(ambientLight);
+            directionalLight = new THREE.DirectionalLight(0xffffff, 0.6);
+            directionalLight.position.set(20, 30, 10); directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 1024; directionalLight.shadow.mapSize.height = 1024;
+            directionalLight.shadow.camera.near = 0.5; directionalLight.shadow.camera.far = 80;
+            directionalLight.shadow.camera.left = -30; directionalLight.shadow.camera.right = 30;
+            directionalLight.shadow.camera.top = 30; directionalLight.shadow.camera.bottom = -30;
+            directionalLight.shadow.bias = -0.001; scene.add(directionalLight);
+
+            loadHighScore();
+            generateInitialPath();
+            createWorld();
+            createRunner();
+            // createTrain(); // <<< REMOVED - Train is now an obstacle
+            setupControls();
+
+            window.addEventListener('resize', onWindowResize);
+
+            messageElement.style.display = 'block';
+            animate();
+        }
+
+        // --- High Score Functions --- (Remain Same)
+        function loadHighScore() { /* ... */ const storedScore = localStorage.getItem(HIGH_SCORE_KEY); highScore = storedScore ? parseInt(storedScore, 10) : 0; updateScoreDisplay(); }
+        function saveHighScore() { /* ... */ localStorage.setItem(HIGH_SCORE_KEY, highScore.toString()); }
+        function checkAndSetHighScore() { /* ... */ const finalScore = Math.floor(score); if (finalScore > highScore) { highScore = finalScore; saveHighScore(); return true; } return false; }
+        function updateScoreDisplay() { /* ... */ const currentScoreDisplay = Math.floor(score); scoreElement.innerHTML = `<span>HI: ${highScore}</span> Score: ${currentScoreDisplay}`; }
+
+
+        // --- Path Logic --- (Remain Same)
+        function generateInitialPath() { /* ... */ pathPoints = []; let currentX = 0; for (let i = 0; i < pathPointsAhead + pathPointsBehind; i++) { if (i < 5) currentX = 0; else { const turnFactor = Math.random() * 0.9 - 0.45; currentX += turnFactor * pathSegmentLength * 0.3; currentX = Math.max(-15, Math.min(15, currentX)); } pathPoints.push(new THREE.Vector3(currentX, 0.01, -i * pathSegmentLength)); } updatePathCurve(); }
+        function updatePathCurve() { /* ... */ if (pathPoints.length >= 4) { if (!pathCurve) { pathCurve = new THREE.CatmullRomCurve3(pathPoints); pathCurve.curveType = 'catmullrom'; pathCurve.tension = 0.4; } else { pathCurve.points = pathPoints; } updateVisualPathMesh(); } else { pathCurve = null; } }
+        function extendPath() { /* ... */ const lastPoint = pathPoints[pathPoints.length - 1]; const secondLastPoint = pathPoints[pathPoints.length - 2]; let currentX = lastPoint.x; const trendX = lastPoint.x - secondLastPoint.x; const randomTurn = Math.random() * 0.9 - 0.45; currentX += trendX * 0.5 + randomTurn * pathSegmentLength * 0.3; currentX = Math.max(-15, Math.min(15, currentX)); const newPoint = new THREE.Vector3(currentX, 0.01, lastPoint.z - pathSegmentLength); pathPoints.push(newPoint); if (pathPoints.length > pathPointsAhead + pathPointsBehind + 10) { pathPoints.shift(); } updatePathCurve(); }
+        function getCurveParamsForWorldZ(worldZ) { /* ... */ if (!pathCurve || pathPoints.length < 2) return { t: 0, index: 0 }; for (let i = 0; i < pathPoints.length - 1; i++) { const p1 = pathPoints[i]; const p2 = pathPoints[i + 1]; if ( (p1.z >= worldZ && p2.z <= worldZ) || (p1.z <= worldZ && p2.z >= worldZ) ) { const segmentLengthZ = Math.abs(p1.z - p2.z); if (segmentLengthZ < 0.01) return { t: 0, index: i }; const t = Math.abs(worldZ - p1.z) / segmentLengthZ; return { t: Math.max(0, Math.min(1, t)), index: i }; } } if (worldZ <= pathPoints[pathPoints.length - 1].z) return { t: 1, index: pathPoints.length - 2 }; if (worldZ >= pathPoints[0].z) return { t: 0, index: 0 }; return { t: 0, index: 0 }; }
+        function getGlobalT(segmentIndex, t) { /* ... */ if (pathPoints.length < 2) return 0; const validIndex = Math.max(0, Math.min(segmentIndex, pathPoints.length - 2)); return Math.max(0, Math.min(1, (validIndex + t) / (pathPoints.length - 1))); }
+        function getPositionOnCurve(globalT) { /* ... */ if (!pathCurve) return new THREE.Vector3(0, 0.01, 0); return pathCurve.getPointAt(globalT); }
+        function getTangentOnCurve(globalT) { /* ... */ if (!pathCurve) return new THREE.Vector3(0, 0, -1); return pathCurve.getTangentAt(globalT).normalize(); }
+
+
+        // --- World Creation ---
+        function createWorld() {
+            // Ground Plane
+            const groundWidth = 60; const groundLength = 250;
+            const groundMat = new THREE.MeshStandardMaterial({ color: COLOR_GROUND_DARK, roughness: 0.8 });
+            const groundGeo = new THREE.PlaneGeometry(groundWidth, groundLength);
+            const mainGround = new THREE.Mesh(groundGeo, groundMat);
+            mainGround.rotation.x = -Math.PI / 2; mainGround.receiveShadow = true; scene.add(mainGround);
+
+            // Path Mesh
+            const pathMeshSegments = pathPointsAhead + pathPointsBehind -1;
+            const pathGeo = new THREE.PlaneGeometry(pathWidth, pathSegmentLength * pathMeshSegments, 1, pathMeshSegments);
+            // <<< MODIFIED Path Material >>>
+            const pathMat = new THREE.MeshStandardMaterial({
+                color: COLOR_PATH,
+                roughness: 0.9,
+                side: THREE.DoubleSide,
+                emissive: COLOR_PATH, // Make it slightly emissive
+                emissiveIntensity: 0.1 // Low intensity to just make it pop
+            });
+            groundPathMesh = new THREE.Mesh(pathGeo, pathMat);
+            groundPathMesh.rotation.x = -Math.PI / 2;
+            groundPathMesh.position.y = 0.015; // <<< Increased Y slightly more
+            groundPathMesh.receiveShadow = true;
+            scene.add(groundPathMesh);
+            updateVisualPathMesh();
+
+            // Water
+            const waterWidth = 70; const waterGeo = new THREE.PlaneGeometry(waterWidth, groundLength);
+            const waterMat = new THREE.MeshStandardMaterial({ color: 0x6b8ead, roughness: 0.4, metalness: 0.2});
+            const water = new THREE.Mesh(waterGeo, waterMat);
+            water.rotation.x = -Math.PI / 2; water.position.y = -0.05; water.position.x = -35;
+            water.receiveShadow = true; scene.add(water);
+
+            // Clouds
+            const cloudMaterial = new THREE.MeshBasicMaterial({ color: COLOR_CLOUD, transparent: true, opacity: 0.85, fog: false });
+            for (let i = 0; i < 10; i++) { /* ... cloud creation ... */
+                 const cloudGroup = new THREE.Group(); const numSpheres = Math.random() * 5 + 4; for (let j = 0; j < numSpheres; j++) { const sphereGeo = new THREE.SphereGeometry(Math.random() * 3 + 1.5, 6, 5); const sphere = new THREE.Mesh(sphereGeo, cloudMaterial); sphere.position.set((Math.random() - 0.5) * 10, (Math.random() - 0.5) * 4, (Math.random() - 0.5) * 5); cloudGroup.add(sphere); } cloudGroup.position.set((Math.random() - 0.5) * 180, Math.random() * 15 + 25, (Math.random() - 0.5) * 200 - 90); cloudGroup.userData.speed = Math.random() * 0.4 + 0.1; scene.add(cloudGroup); clouds.push(cloudGroup); }
+
+            // Mountains <<< MODIFIED Positioning >>>
+            const mountainMaterial = new THREE.MeshStandardMaterial({ color: COLOR_MOUNTAIN, roughness: 0.9 });
+            const minMountainDistX = pathWidth * 2 + 15; // Min distance from path center edge
+            for (let i = 0; i < 10; i++) { // More mountains maybe
+                const height = Math.random() * 50 + 30; const radius = Math.random() * 15 + 10;
+                const mountainGeo = new THREE.ConeGeometry(radius, height, Math.floor(Math.random() * 4) + 5);
+                const mountain = new THREE.Mesh(mountainGeo, mountainMaterial);
+                const side = (Math.random() < 0.5 ? -1 : 1); // Choose left or right
+                const mountainX = side * (minMountainDistX + Math.random() * 80); // Place beyond min distance
+                const mountainZ = -100 - Math.random() * 80; // Place in the background
+                mountain.position.set(mountainX, height * 0.45, mountainZ);
+                mountain.rotation.y = Math.random() * Math.PI * 2;
+                scene.add(mountain);
+                mountains.push(mountain);
+            }
+
+            // Trees <<< MODIFIED Positioning >>>
+             const trunkMaterial = new THREE.MeshStandardMaterial({ color: COLOR_TREE_TRUNK, roughness: 0.8 });
+             const leavesMaterial = new THREE.MeshStandardMaterial({ color: COLOR_TREE_LEAVES, roughness: 0.7 });
+             const minTreeDistX = pathWidth + 2; // Min distance from path edge
+             for (let i = 0; i < 60; i++) { // More trees
+                  const treeGroup = new THREE.Group();
+                  const trunkHeight = Math.random() * 1.5 + 1.0; const leavesHeight = Math.random() * 4 + 3; const leavesRadius = Math.random() * 0.8 + 0.6;
+                  const trunkGeo = new THREE.CylinderGeometry(0.15, 0.25, trunkHeight, 6); const leavesGeo = new THREE.ConeGeometry(leavesRadius, leavesHeight, 7);
+                  const trunk = new THREE.Mesh(trunkGeo, trunkMaterial); trunk.position.y = trunkHeight / 2; trunk.castShadow = true; treeGroup.add(trunk);
+                  const leaves = new THREE.Mesh(leavesGeo, leavesMaterial); leaves.position.y = trunkHeight + leavesHeight * 0.45; leaves.castShadow = true; treeGroup.add(leaves);
+                  const side = (Math.random() < 0.5 ? 1 : -1);
+                  const distance = minTreeDistX + Math.random() * 25; // Place tree further out from path edge
+                  const treeZ = (Math.random() - 0.5) * 220 - 100;
+                  const treeCurveParams = getCurveParamsForWorldZ(treeZ);
+                  // Use path point X at that Z as a base, then add side*distance
+                  const treeCurvePos = getPositionOnCurve(getGlobalT(treeCurveParams.index, treeCurveParams.t));
+                  treeGroup.position.set(treeCurvePos.x + side * distance, 0, treeZ);
+                  treeGroup.rotation.y = Math.random() * 0.2 - 0.1;
+                  scene.add(treeGroup);
+                  trees.push(treeGroup);
+             }
+        }
+        function updateVisualPathMesh() { /* ... remains the same ... */ if (!groundPathMesh || !pathCurve || pathPoints.length < 2) return; const geometry = groundPathMesh.geometry; const positions = geometry.attributes.position; const vertex = new THREE.Vector3(); const tangent = new THREE.Vector3(); const normal = new THREE.Vector3(); const up = new THREE.Vector3(0, 1, 0); const segments = geometry.parameters.heightSegments; const meshStartZ = pathPoints[0].z; for (let i = 0; i <= segments; i++) { const targetWorldZ = meshStartZ - (i * pathSegmentLength); const curveParams = getCurveParamsForWorldZ(targetWorldZ); const globalT = getGlobalT(curveParams.index, curveParams.t); const point = getPositionOnCurve(globalT); tangent.copy(getTangentOnCurve(globalT)); normal.crossVectors(up, tangent).normalize(); const indexLeft = i * 2; const indexRight = i * 2 + 1; if (indexLeft < positions.count && indexRight < positions.count) { vertex.copy(point).addScaledVector(normal, -pathWidth / 2); positions.setXYZ(indexLeft, vertex.x, point.y, vertex.z); vertex.copy(point).addScaledVector(normal, pathWidth / 2); positions.setXYZ(indexRight, vertex.x, point.y, vertex.z); } } positions.needsUpdate = true; geometry.computeVertexNormals(); }
+
+
+        // --- Runner Creation --- (Remain Same)
+        function createRunner() { /* ... */ const runnerHeight = 0.8; const runnerWidth = 0.6; const runnerGeo = new THREE.BoxGeometry(runnerWidth, runnerHeight, runnerWidth * 0.8); const runnerMat = new THREE.MeshStandardMaterial({ color: COLOR_RUNNER, roughness: 0.6 }); runner = new THREE.Mesh(runnerGeo, runnerMat); runner.position.set(0, runnerStartY, 0); runner.castShadow = true; scene.add(runner); }
+
+        // --- Train Creation --- <<< REMOVED >>>
+
+        // --- Obstacle Creation --- <<< MODIFIED for Train >>>
+        function createObstacle(type, forcedOffsetX = null) {
+            if (!pathCurve || pathPoints.length < 2) return;
+
+            const obstacleGroup = new THREE.Group();
+            obstacleGroup.userData.type = type;
+            obstacleGroup.userData.hit = false;
+            obstacleGroup.userData.worldZ = currentRunnerWorldZ - obstacleSpawnLookAhead - (Math.random() * 10);
+
+            let offsetX;
+            if (forcedOffsetX !== null) {
+                offsetX = forcedOffsetX; // Used by multi-spawn
+            } else if (type === 'cactus') {
+                offsetX = runnerOffsetX; // Aim single cactus at player
+            } else if (type === 'train'){
+                 offsetX = 0; // Train always centered on path
+            } else { // Ptero or others
+                 offsetX = (Math.random() - 0.5) * (pathWidth * 0.75); // Random
+            }
+             obstacleGroup.userData.offsetX = offsetX;
+
+
+            const curveParams = getCurveParamsForWorldZ(obstacleGroup.userData.worldZ);
+             if(curveParams.index < 0 || curveParams.index >= pathPoints.length - 1) { return; }
+
+            const globalT = getGlobalT(curveParams.index, curveParams.t);
+            const spawnPoint = getPositionOnCurve(globalT);
+            const tangent = getTangentOnCurve(globalT);
+            const normal = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), tangent).normalize();
+
+            const spawnX = spawnPoint.x + normal.x * offsetX;
+            let baseSpawnY = spawnPoint.y; // Usually ground level (0.01)
+
+            // Materials
+            const cactusMat = new THREE.MeshStandardMaterial({ color: COLOR_CACTUS, roughness: 0.8 });
+            const pteroMat = new THREE.MeshStandardMaterial({ color: COLOR_PTERO, roughness: 0.7 });
+            const trainBodyMat = new THREE.MeshStandardMaterial({ color: COLOR_TRAIN_BODY, roughness: 0.6 });
+            const trainWheelMat = new THREE.MeshStandardMaterial({ color: COLOR_TRAIN_WHEEL, roughness: 0.5 });
+
+             if (type === 'cactus') {
+                 const numParts = Math.floor(Math.random() * 2) + 1; const baseHeight = 0.6 + Math.random() * 0.4; const partWidth = 0.2;
+                 for (let i = 0; i < numParts; i++) { /* ... part creation ... */ const partHeight = baseHeight * (0.7 + Math.random() * 0.5); const partGeo = new THREE.BoxGeometry(partWidth, partHeight, partWidth); const part = new THREE.Mesh(partGeo, cactusMat); part.position.set((i - (numParts - 1) / 2) * partWidth * 0.6, partHeight / 2, (Math.random()-0.5)*0.05); part.castShadow = true; obstacleGroup.add(part); }
+                 obstacleGroup.userData.hitHeight = baseHeight * 1.1; obstacleGroup.userData.hitWidth = numParts * partWidth * 1.0;
+             } else if (type === 'pterodactyl') {
+                 const bodyGeo = new THREE.BoxGeometry(0.6, 0.15, 0.3); const wingGeo = new THREE.BoxGeometry(1.0, 0.05, 0.2); const body = new THREE.Mesh(bodyGeo, pteroMat); const wingPivot = new THREE.Group(); const wing = new THREE.Mesh(wingGeo, pteroMat); wing.position.x = 0.5; wingPivot.add(wing); wingPivot.position.set(0, 0, 0); obstacleGroup.add(body); obstacleGroup.add(wingPivot); obstacleGroup.userData.wingPivot = wingPivot; baseSpawnY += 1.3 + Math.random() * 0.6; // Set flying height
+                 obstacleGroup.userData.hitHeight = 0.4; obstacleGroup.userData.hitWidth = 1.2; obstacleGroup.castShadow = true; obstacleGroup.children.forEach(c => c.castShadow = true); wing.castShadow = true;
+             } else if (type === 'train') {
+                 const trainLength = 8;
+                 const trainWidth = 1.2;
+                 const trainHeight = 1.0;
+                 const bodyGeo = new THREE.BoxGeometry(trainWidth, trainHeight, trainLength);
+                 const body = new THREE.Mesh(bodyGeo, trainBodyMat);
+                 body.castShadow = true;
+                 body.position.y = trainHeight / 2; // Center body vertically
+                 obstacleGroup.add(body);
+
+                 // Add simple wheels
+                 const wheelRadius = 0.25;
+                 const wheelGeo = new THREE.CylinderGeometry(wheelRadius, wheelRadius, 0.1, 16);
+                 const numWheelsPerSide = 4;
+                 for(let i = 0; i < numWheelsPerSide; i++) {
+                     const wheelZ = (i - (numWheelsPerSide - 1) / 2) * (trainLength * 0.2);
+                     const wheelL = new THREE.Mesh(wheelGeo, trainWheelMat);
+                     wheelL.rotation.z = Math.PI / 2; // Orient cylinder correctly
+                     wheelL.position.set(-trainWidth / 2 - 0.05, wheelRadius, wheelZ);
+                     obstacleGroup.add(wheelL);
+                     const wheelR = new THREE.Mesh(wheelGeo, trainWheelMat);
+                     wheelR.rotation.z = Math.PI / 2;
+                     wheelR.position.set(trainWidth / 2 + 0.05, wheelRadius, wheelZ);
+                     obstacleGroup.add(wheelR);
+                 }
+
+                 obstacleGroup.userData.hitHeight = trainHeight + 0.1; // Slightly more than visual height
+                 obstacleGroup.userData.hitWidth = trainWidth;
+                 obstacleGroup.userData.hitDepth = trainLength; // Important for collision check
+                 baseSpawnY += wheelRadius; // Base of train is at wheel bottom
+             }
+
+            obstacleGroup.position.set(spawnX, baseSpawnY, obstacleGroup.userData.worldZ);
+            obstacleGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), tangent);
+
+            scene.add(obstacleGroup);
+            obstacles.push(obstacleGroup);
+        }
+
+        // --- Controls --- (Remain Same)
+        function setupControls() { /* ... */ document.addEventListener('keydown', onKeyDown); document.addEventListener('keyup', onKeyUp); document.addEventListener('touchstart', handleTouchInput, { passive: false }); isTouchDevice = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0); if (isTouchDevice) { controlsMoveDiv.style.display = 'flex'; setupButton('btn-left', () => moveRunnerLeft = true, () => moveRunnerLeft = false); setupButton('btn-right', () => moveRunnerRight = true, () => moveRunnerRight = false); const jumpBtn = document.getElementById('btn-jump'); if(jumpBtn) { jumpBtn.addEventListener('touchstart', (e) => { e.preventDefault(); if (currentGameState === GAME_STATE.RUNNING && isOnGround) triggerJump(); }, { passive: false }); jumpBtn.addEventListener('touchend', (e) => { e.preventDefault(); }); jumpBtn.addEventListener('pointerdown', (e) => { if (currentGameState === GAME_STATE.IDLE || currentGameState === GAME_STATE.GAME_OVER) startGame(); }, { passive: false }); } } }
+        function setupButton(id, downAction, upAction) { /* ... */ const btn = document.getElementById(id); if (!btn) return; btn.addEventListener('touchstart', (e) => { e.preventDefault(); downAction(); }, { passive: false }); btn.addEventListener('touchend', (e) => { e.preventDefault(); upAction(); }); btn.addEventListener('mousedown', (e) => { downAction(); }); btn.addEventListener('mouseup', (e) => { upAction(); }); btn.addEventListener('mouseleave', (e) => { upAction(); }); }
+        function onKeyDown(event) { /* ... */ if (event.code === 'Space') { event.preventDefault(); if (currentGameState === GAME_STATE.RUNNING && isOnGround) triggerJump(); else if (currentGameState === GAME_STATE.IDLE || currentGameState === GAME_STATE.GAME_OVER) startGame(); } else if (event.code === 'KeyA' || event.code === 'ArrowLeft') moveRunnerLeft = true; else if (event.code === 'KeyD' || event.code === 'ArrowRight') moveRunnerRight = true; }
+        function onKeyUp(event) { /* ... */ if (event.code === 'KeyA' || event.code === 'ArrowLeft') moveRunnerLeft = false; else if (event.code === 'KeyD' || event.code === 'ArrowRight') moveRunnerRight = false; }
+        function handleTouchInput(event) { /* ... */ let targetElement = event.target; if (targetElement.tagName === 'BUTTON' && (targetElement.id === 'btn-left' || targetElement.id === 'btn-right')) { return; } event.preventDefault(); if (currentGameState === GAME_STATE.RUNNING && isOnGround) triggerJump(); else if (currentGameState === GAME_STATE.IDLE || currentGameState === GAME_STATE.GAME_OVER) startGame(); }
+
+        // --- Game State / Reset --- (Remain Same)
+        function startGame() { /* ... */ if (currentGameState === GAME_STATE.IDLE || currentGameState === GAME_STATE.GAME_OVER) { resetGame(); currentGameState = GAME_STATE.RUNNING; messageElement.style.display = 'none'; } }
+        function triggerGameOver() { /* ... */ if (currentGameState === GAME_STATE.RUNNING) { currentGameState = GAME_STATE.GAME_OVER; const newHighScore = checkAndSetHighScore(); let message = `Game Over! Score: ${Math.floor(score)}`; if(newHighScore) message += `\nNEW HIGH SCORE!`; message += `\nPress SPACE or Tap Jump to Restart`; messageElement.innerHTML = message.replace(/\n/g, '<br>'); messageElement.style.display = 'block'; } }
+        function resetGame() { /* ... */ score = 0; gameSpeed = initialGameSpeed; runnerOffsetX = 0; currentRunnerWorldZ = 0; difficultyLevel = 0; nextMilestoneScore = 500; loadHighScore(); generateInitialPath(); runner.position.set(0, runnerStartY, 0); runnerVelocityY = 0; isOnGround = true; lastSpawnTime = clock.getElapsedTime(); nextSpawnDelay = 2.5 + Math.random(); lastTrainSpawnTime = clock.getElapsedTime() - minTrainSpawnDelay + 5; obstacles.forEach(obs => scene.remove(obs)); obstacles = []; updateScoreDisplay(); messageElement.textContent = 'Press SPACE or Tap Jump to Start'; messageElement.style.display = 'block'; currentGameState = GAME_STATE.IDLE; }
+        function triggerJump() { /* ... */ if (isOnGround) { runnerVelocityY = jumpVelocity; isOnGround = false; } }
+
+        // --- Difficulty: Multi-Spawn Function --- (Remain Same)
+        function triggerMultiSpawn() { /* ... */ console.log(`Difficulty Level ${difficultyLevel} reached! Multi-Spawn!`); const numToSpawn = Math.min(4, difficultyLevel + 1); const spread = pathWidth * 0.3; for (let i = 0; i < numToSpawn; i++) { let offset = runnerOffsetX + (i - (numToSpawn - 1) / 2) * spread; offset += (Math.random() - 0.5) * spread * 0.3; offset = Math.max(-pathWidth/2 * 0.8, Math.min(pathWidth/2 * 0.8, offset)); createObstacle('cactus', offset); } }
+
+
+        // --- Updates ---
+        function updateRunner(deltaTime) { /* ... remains same ... */ if (!pathCurve) return; if (!isOnGround) runnerVelocityY -= gravity * deltaTime; let nextY = runner.position.y + runnerVelocityY * deltaTime; if (nextY <= runnerStartY) { nextY = runnerStartY; runnerVelocityY = 0; isOnGround = true; } const sideSpeedDelta = runnerSideSpeed * deltaTime; if (moveRunnerLeft) runnerOffsetX -= sideSpeedDelta; if (moveRunnerRight) runnerOffsetX += sideSpeedDelta; runnerOffsetX = Math.max(-maxRunnerOffsetX, Math.min(maxRunnerOffsetX, runnerOffsetX)); currentRunnerWorldZ -= gameSpeed * deltaTime; const curveParams = getCurveParamsForWorldZ(currentRunnerWorldZ); const globalT = getGlobalT(curveParams.index, curveParams.t); const centerPoint = getPositionOnCurve(globalT); const tangent = getTangentOnCurve(globalT); const normal = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), tangent).normalize(); const targetX = centerPoint.x + normal.x * runnerOffsetX; const targetZ = centerPoint.z + normal.z * runnerOffsetX; runner.position.x = THREE.MathUtils.lerp(runner.position.x, targetX, 0.15); runner.position.z = THREE.MathUtils.lerp(runner.position.z, targetZ, 0.15); runner.position.y = nextY; const lookAtPos = runner.position.clone().add(tangent.multiplyScalar(-5)); lookAtPos.y = runner.position.y + 0.1; runner.lookAt(lookAtPos); if (pathPoints.length > 0 && currentRunnerWorldZ < pathPoints[pathPoints.length - pathPointsAhead + 3].z) { extendPath(); } }
+        function updateObstacles(deltaTime) { /* ... remains same - updates all obstacles including train ... */ if (!pathCurve) return; const speedDelta = gameSpeed * deltaTime; const removalZ = currentRunnerWorldZ + 15; for (let i = obstacles.length - 1; i >= 0; i--) { const obs = obstacles[i]; obs.userData.worldZ += speedDelta; const curveParams = getCurveParamsForWorldZ(obs.userData.worldZ); if(curveParams.index < 0 || curveParams.index >= pathPoints.length - 1) { scene.remove(obs); obstacles.splice(i, 1); continue; } const globalT = getGlobalT(curveParams.index, curveParams.t); const centerPoint = getPositionOnCurve(globalT); const tangent = getTangentOnCurve(globalT); const normal = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), tangent).normalize(); const targetX = centerPoint.x + normal.x * obs.userData.offsetX; const targetZ = centerPoint.z + normal.z * obs.userData.offsetX; obs.position.x = targetX; obs.position.z = targetZ; if (obs.userData.type === 'pterodactyl' && obs.userData.wingPivot) { const time = clock.getElapsedTime(); obs.userData.wingPivot.rotation.x = Math.sin(time * 4.5) * 0.65; } obs.quaternion.setFromUnitVectors(new THREE.Vector3(0,0,-1), tangent); if (obs.userData.worldZ > removalZ) { scene.remove(obs); obstacles.splice(i, 1); } } }
+        function updateScenery(deltaTime) { // <<< REMOVED Train update from here
+            const speedDelta = gameSpeed * deltaTime; const cloudSpeedFactor = 0.1;
+            clouds.forEach(cloud => { cloud.position.z += (speedDelta * cloudSpeedFactor + cloud.userData.speed) * deltaTime; if (cloud.position.z > currentRunnerWorldZ + 100) { cloud.position.z = currentRunnerWorldZ - 150 - Math.random() * 50; cloud.position.x = (Math.random() - 0.5) * 180; } });
+            // Mountains and Trees are static relative to the world, appearing to move due to camera/player motion
+        }
+
+        function spawnObstacles(currentTime) { // <<< MODIFIED for Train spawn chance
+            if (!pathCurve) return;
+
+            // Check regular obstacle spawn timer
+            if (currentTime - lastSpawnTime > nextSpawnDelay) {
+                let obstacleType;
+                const canSpawnPtero = score >= 500;
+                const timeSinceLastTrain = currentTime - lastTrainSpawnTime;
+
+                // Decide obstacle type: Prioritize train if cooldown met, otherwise cactus/ptero
+                if (difficultyLevel > 0 && timeSinceLastTrain > minTrainSpawnDelay && Math.random() < 0.15) { // 15% chance after level 1 and cooldown
+                    obstacleType = 'train';
+                    lastTrainSpawnTime = currentTime; // Reset train timer
+                } else {
+                     obstacleType = (canSpawnPtero && Math.random() > 0.65) ? 'pterodactyl' : 'cactus';
+                }
+
+                // Create the chosen obstacle (Cactus targets player, others random/centered)
+                createObstacle(obstacleType); // Pass null for offsetX, createObstacle handles targeting
+
+                lastSpawnTime = currentTime; // Reset general spawn timer
+                const baseDelay = (obstacleType === 'train') ? 1.8 : 1.3; // Slightly longer delay after train?
+                const speedFactor = Math.max(0.3, 30 / (gameSpeed + 20));
+                nextSpawnDelay = baseDelay * speedFactor + Math.random() * speedFactor * 0.6;
+            }
+        }
+        function checkCollisions() { /* ... remains same ... */ if (!runner) return false; const runnerCollider = new THREE.Box3().setFromObject(runner); runnerCollider.min.y += 0.05; runnerCollider.max.y -= 0.05; runnerCollider.min.x += 0.05; runnerCollider.max.x -= 0.05; for (const obs of obstacles) { const obsCollider = new THREE.Box3().setFromObject(obs); if (runnerCollider.intersectsBox(obsCollider)) { obs.userData.hit = true; return true; } } return false; }
+
+        function updateScore(deltaTime) { // <<< Handles gradual speed AND milestone checks
+             score += gameSpeed * deltaTime * 0.8; updateScoreDisplay();
+             if (gameSpeed < maxGameSpeed) { gameSpeed += score * speedIncreaseFactor * deltaTime; }
+             if (score >= nextMilestoneScore) {
+                 if (difficultyLevel === 0) { gameSpeed *= 2; difficultyLevel = 1; nextMilestoneScore = 800; console.log("Milestone 1! Speed x2"); }
+                 else { gameSpeed *= 2; difficultyLevel++; nextMilestoneScore += 300; console.log(`Milestone ${difficultyLevel}! Speed x2 & Multi-Spawn`); triggerMultiSpawn(); }
+             }
+             gameSpeed = Math.min(gameSpeed, maxGameSpeed);
+        }
+
+
+        // --- Animation Loop --- (Remains Same)
+        function animate() { requestAnimationFrame(animate); const deltaTime = clock.getDelta(); if (currentGameState === GAME_STATE.RUNNING) { updateRunner(deltaTime); updateObstacles(deltaTime); updateScenery(deltaTime); updateScore(deltaTime); spawnObstacles(clock.getElapsedTime()); if (checkCollisions()) { triggerGameOver(); } } else { updateScenery(deltaTime); } if(runner && pathCurve) { const cameraLookAheadDist = -6.5; const cameraSideOffset = 0; const cameraHeightOffset = 2.2; const targetCamZ = currentRunnerWorldZ - cameraLookAheadDist; const camCurveParams = getCurveParamsForWorldZ(targetCamZ); if(camCurveParams.index >= 0 && camCurveParams.index < pathPoints.length -1) { const globalT = getGlobalT(camCurveParams.index, camCurveParams.t); const camTargetPoint = getPositionOnCurve(globalT); const camTangent = getTangentOnCurve(globalT); const camNormal = new THREE.Vector3().crossVectors(new THREE.Vector3(0,1,0), camTangent).normalize(); const camPosX = camTargetPoint.x + camNormal.x * cameraSideOffset; const camPosZ = camTargetPoint.z + camNormal.z * cameraSideOffset; camera.position.lerp(new THREE.Vector3(camPosX, runner.position.y + cameraHeightOffset, camPosZ), 0.08); const lookAtZ = currentRunnerWorldZ - 3; const lookAtCurveParams = getCurveParamsForWorldZ(lookAtZ); if(lookAtCurveParams.index >= 0 && lookAtCurveParams.index < pathPoints.length -1){ const lookAtGlobalT = getGlobalT(lookAtCurveParams.index, lookAtCurveParams.t); const lookAtPoint = getPositionOnCurve(lookAtGlobalT); lookAtPoint.y = runner.position.y + 0.2; camera.lookAt(lookAtPoint); } } else { camera.position.y = runnerStartY + cameraHeightOffset; camera.lookAt(runner.position); } } renderer.render(scene, camera); }
+
+        // --- Resize --- (Remain Same)
+        function onWindowResize() { /* ... */ camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); }
+
+        // --- Start ---
+        init();
+    </script>
+</body>
+</html>
